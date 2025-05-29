@@ -5,10 +5,11 @@ import sys
 import json
 import shutil
 import time
-import urllib.request
+import tempfile
 from pathlib import Path
 
 import yt_dlp
+from yt_dlp.utils import YoutubeDLError
 import videoprops
 from aiogram import types, Bot
 from aiogram.client.default import DefaultBotProperties
@@ -20,36 +21,6 @@ logging.basicConfig(
     format="[YouTubeDL-Service] %(message)s - %(asctime)s",
     datefmt="%H:%M:%S",
 )
-
-def download_yt_dlp():
-    """Download yt-dlp executable synchronously"""
-    try:
-        # Define the executable name based on platform
-        if sys.platform == 'win32':
-            exe_name = 'yt-dlp.exe'
-            url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
-        else:
-            exe_name = 'yt-dlp'
-            url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp'
-        
-        # Get the directory of this script
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        exe_path = os.path.join(script_dir, exe_name)
-        
-        if not os.path.exists(exe_path):
-            logging.info(f"Downloading yt-dlp to {exe_path}")
-            urllib.request.urlretrieve(url, exe_path)
-            # Make executable on Unix
-            if sys.platform != 'win32':
-                os.chmod(exe_path, 0o755)
-            logging.info("Successfully downloaded yt-dlp")
-        return exe_path
-    except Exception as e:
-        logging.error(f"Failed to download yt-dlp: {e}")
-        return None
-
-# Download yt-dlp on module import
-YT_DLP_PATH = download_yt_dlp()
 
 # Mock message class to pass to the Downloader
 class MockMessage:
@@ -87,12 +58,19 @@ async def manual_download(url, quality, user_id):
     """Download media using yt-dlp directly"""
     logging.info(f"Manual download: {url}, quality={quality}")
     
-    if not YT_DLP_PATH:
-        raise Exception("Could not find or download yt-dlp executable")
-    
     # Set the filename based on quality
     ext = 'm4a' if quality == 'audio' else 'mp4'
     filename = f"{user_id}.{ext}"
+    
+    # Create temp cookie file
+    cookie_file = os.path.join(tempfile.gettempdir(), f'instagram_cookies_{user_id}.txt')
+    try:
+        with open(cookie_file, 'w') as f:
+            f.write("""# Netscape HTTP Cookie File
+.instagram.com	TRUE	/	TRUE	1735689600	ds_user_id	6837530647
+.instagram.com	TRUE	/	TRUE	1735689600	sessionid	6837530647%3AJ0lPYYYYxxx%3A28%3AAYxxx""")
+    except Exception as e:
+        logging.error(f"Failed to create cookie file: {e}")
     
     # Ensure the file doesn't exist
     if os.path.exists(filename):
@@ -100,19 +78,17 @@ async def manual_download(url, quality, user_id):
             os.remove(filename)
         except Exception as e:
             logging.error(f"Could not remove existing file: {e}")
-            # Create a unique filename if we can't remove the existing file
             filename = f"{user_id}_{int(time.time())}.{ext}"
     
-    # Set up yt-dlp options with Instagram cookies
+    # Set up yt-dlp options
     common_opts = {
         'outtmpl': filename,
-        'cookiesfrombrowser': 'chrome',  # Just specify the browser name as string
-        'cookiefile': os.path.join(os.path.dirname(__file__), 'instagram_cookies.txt'),
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'cookiefile': cookie_file,
+        'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 12_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 105.0.0.11.118 (iPhone11,8; iOS 12_3_1; en_US; en-US; scale=2.00; 828x1792; 165586599)',
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
     }
-
-    # Add path to yt-dlp executable and its directory for ffmpeg
-    common_opts['ffmpeg_location'] = os.path.dirname(YT_DLP_PATH)
     
     if quality == 'audio':
         ydl_opts = {
@@ -137,20 +113,29 @@ async def manual_download(url, quality, user_id):
             except Exception as e:
                 logging.error(f"Download failed: {str(e)}")
                 if "rate-limit" in str(e).lower() or "login required" in str(e).lower():
-                    raise Exception("Instagram rate limit reached. Please try again later or provide valid cookies.")
+                    raise Exception("Instagram rate limit reached. Please try again later.")
                 raise
         return filename
     
-    # Run the download in a thread pool
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, download_with_ytdlp)
-    
-    # Verify the file exists
-    if not os.path.exists(result):
-        raise Exception(f"File {result} was not created")
-    
-    logging.info(f"Downloaded file successfully: {result}")
-    return result
+    try:
+        # Run the download in a thread pool
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, download_with_ytdlp)
+        
+        # Verify the file exists
+        if not os.path.exists(result):
+            raise Exception(f"File {result} was not created")
+        
+        logging.info(f"Downloaded file successfully: {result}")
+        return result
+    finally:
+        # Clean up temp cookie file
+        try:
+            if os.path.exists(cookie_file):
+                os.remove(cookie_file)
+        except Exception as e:
+            logging.error(f"Failed to remove cookie file: {e}")
+
 
 async def download_media(url, quality, chat_id, user_id):
     """Process a download request"""

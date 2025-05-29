@@ -1,4 +1,6 @@
 aiogram
 python-dotenv
 Requests
-yt_dlp
+yt-dlp>=2023.11.16
+ffmpeg-python
+get-video-properties
