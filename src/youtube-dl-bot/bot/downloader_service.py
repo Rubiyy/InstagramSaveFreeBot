@@ -5,6 +5,7 @@ import sys
 import json
 import shutil
 import time
+import urllib.request
 from pathlib import Path
 
 import yt_dlp
@@ -19,6 +20,36 @@ logging.basicConfig(
     format="[YouTubeDL-Service] %(message)s - %(asctime)s",
     datefmt="%H:%M:%S",
 )
+
+def download_yt_dlp():
+    """Download yt-dlp executable synchronously"""
+    try:
+        # Define the executable name based on platform
+        if sys.platform == 'win32':
+            exe_name = 'yt-dlp.exe'
+            url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+        else:
+            exe_name = 'yt-dlp'
+            url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp'
+        
+        # Get the directory of this script
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        exe_path = os.path.join(script_dir, exe_name)
+        
+        if not os.path.exists(exe_path):
+            logging.info(f"Downloading yt-dlp to {exe_path}")
+            urllib.request.urlretrieve(url, exe_path)
+            # Make executable on Unix
+            if sys.platform != 'win32':
+                os.chmod(exe_path, 0o755)
+            logging.info("Successfully downloaded yt-dlp")
+        return exe_path
+    except Exception as e:
+        logging.error(f"Failed to download yt-dlp: {e}")
+        return None
+
+# Download yt-dlp on module import
+YT_DLP_PATH = download_yt_dlp()
 
 # Mock message class to pass to the Downloader
 class MockMessage:
@@ -56,6 +87,9 @@ async def manual_download(url, quality, user_id):
     """Download media using yt-dlp directly"""
     logging.info(f"Manual download: {url}, quality={quality}")
     
+    if not YT_DLP_PATH:
+        raise Exception("Could not find or download yt-dlp executable")
+    
     # Set the filename based on quality
     ext = 'm4a' if quality == 'audio' else 'mp4'
     filename = f"{user_id}.{ext}"
@@ -69,11 +103,21 @@ async def manual_download(url, quality, user_id):
             # Create a unique filename if we can't remove the existing file
             filename = f"{user_id}_{int(time.time())}.{ext}"
     
-    # Set up yt-dlp options
+    # Set up yt-dlp options with Instagram cookies
+    common_opts = {
+        'outtmpl': filename,
+        'cookiesfrombrowser': 'chrome',  # Just specify the browser name as string
+        'cookiefile': os.path.join(os.path.dirname(__file__), 'instagram_cookies.txt'),
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    }
+
+    # Add path to yt-dlp executable and its directory for ffmpeg
+    common_opts['ffmpeg_location'] = os.path.dirname(YT_DLP_PATH)
+    
     if quality == 'audio':
         ydl_opts = {
+            **common_opts,
             'format': 'bestaudio/best',
-            'outtmpl': filename,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'm4a',
@@ -81,14 +125,20 @@ async def manual_download(url, quality, user_id):
         }
     else:  # video
         ydl_opts = {
+            **common_opts,
             'format': 'best[ext=mp4]/best',
-            'outtmpl': filename,
         }
     
     # Use asyncio to run yt-dlp in a separate thread
     def download_with_ytdlp():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            try:
+                ydl.download([url])
+            except Exception as e:
+                logging.error(f"Download failed: {str(e)}")
+                if "rate-limit" in str(e).lower() or "login required" in str(e).lower():
+                    raise Exception("Instagram rate limit reached. Please try again later or provide valid cookies.")
+                raise
         return filename
     
     # Run the download in a thread pool
